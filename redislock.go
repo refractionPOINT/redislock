@@ -50,7 +50,7 @@ func New(client RedisClient) *Client {
 
 // Obtain tries to obtain a new lock using a key with the given TTL.
 // May return ErrNotObtained if not successful.
-func (c *Client) Obtain(key string, ttl time.Duration, opt *Options) (*Lock, error) {
+func (c *Client) Obtain(key string, waitFor time.Duration, ttl time.Duration, isRenew bool, opt *Options) (*Lock, error) {
 	// Create a random token
 	token, err := c.randomToken()
 	if err != nil {
@@ -62,13 +62,25 @@ func (c *Client) Obtain(key string, ttl time.Duration, opt *Options) (*Lock, err
 	retry := opt.getRetryStrategy()
 
 	var timer *time.Timer
-	for deadline := time.Now().Add(ttl); time.Now().Before(deadline); {
+	for deadline := time.Now().Add(waitFor); time.Now().Before(deadline); {
 
 		ok, err := c.obtain(key, value, ttl)
 		if err != nil {
 			return nil, err
 		} else if ok {
-			return &Lock{client: c, key: key, value: value}, nil
+			newLock := &Lock{client: c, key: key, value: value, isRenewing: isRenew}
+			if isRenew {
+				go func() {
+					for {
+						time.Sleep(time.Duration(float64(ttl) * 0.75))
+						if !newLock.isRenewing {
+							break
+						}
+						newLock.Refresh(ttl, opt)
+					}
+				}()
+			}
+			return newLock, nil
 		}
 
 		backoff := retry.NextBackoff()
@@ -115,14 +127,15 @@ func (c *Client) randomToken() (string, error) {
 
 // Lock represents an obtained, distributed lock.
 type Lock struct {
-	client *Client
-	key    string
-	value  string
+	client     *Client
+	key        string
+	value      string
+	isRenewing bool
 }
 
 // Obtain is a short-cut for New(...).Obtain(...).
-func Obtain(client RedisClient, key string, ttl time.Duration, opt *Options) (*Lock, error) {
-	return New(client).Obtain(key, ttl, opt)
+func Obtain(client RedisClient, key string, waitFor time.Duration, ttl time.Duration, isRenew bool, opt *Options) (*Lock, error) {
+	return New(client).Obtain(key, ttl, waitFor, isRenew, opt)
 }
 
 // Key returns the redis key used by the lock.
@@ -171,6 +184,7 @@ func (l *Lock) Refresh(ttl time.Duration, opt *Options) error {
 // Release manually releases the lock.
 // May return ErrLockNotHeld.
 func (l *Lock) Release() error {
+	l.isRenewing = false
 	res, err := luaRelease.Run(l.client.client, []string{l.key}, l.value).Result()
 	if err == redis.Nil {
 		return ErrLockNotHeld
