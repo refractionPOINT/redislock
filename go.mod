@@ -1,4 +1,4 @@
-module github.com/bsm/redislock
+module github.com/refractionPOINT/redislock
 
 require (
 	github.com/go-redis/redis/v7 v7.2.0
